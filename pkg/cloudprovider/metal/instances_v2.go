@@ -6,6 +6,7 @@ package metal
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,12 +38,12 @@ func (o *metalInstancesV2) InstanceExists(ctx context.Context, node *corev1.Node
 	}
 	klog.V(4).InfoS("Checking if node exists", "Node", node.Name)
 
-	serverClaim := &metalv1alpha1.ServerClaim{}
-	if err := o.metalClient.Get(ctx, client.ObjectKey{Namespace: o.metalNamespace, Name: node.Name}, serverClaim); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, cloudprovider.InstanceNotFound
-		}
-		return false, fmt.Errorf("failed to get server claim object for node %s: %w", node.Name, err)
+	serverClaim, err := o.getServerClaimForNode(ctx, node)
+	if err != nil {
+		return false, err
+	}
+	if serverClaim == nil {
+		return false, cloudprovider.InstanceNotFound
 	}
 
 	klog.V(4).InfoS("Instance for node exists", "Node", node.Name, "ServerClaim", client.ObjectKeyFromObject(serverClaim))
@@ -55,12 +56,12 @@ func (o *metalInstancesV2) InstanceShutdown(ctx context.Context, node *corev1.No
 	}
 	klog.V(4).InfoS("Checking if instance is shut down", "Node", node.Name)
 
-	serverClaim := &metalv1alpha1.ServerClaim{}
-	if err := o.metalClient.Get(ctx, client.ObjectKey{Namespace: o.metalNamespace, Name: node.Name}, serverClaim); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, cloudprovider.InstanceNotFound
-		}
-		return false, fmt.Errorf("failed to get server claim object for node %s: %w", node.Name, err)
+	serverClaim, err := o.getServerClaimForNode(ctx, node)
+	if err != nil {
+		return false, err
+	}
+	if serverClaim == nil {
+		return false, cloudprovider.InstanceNotFound
 	}
 
 	server := &metalv1alpha1.Server{}
@@ -81,15 +82,18 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		return nil, nil
 	}
 
-	serverClaim := &metalv1alpha1.ServerClaim{}
-	if err := o.metalClient.Get(ctx, client.ObjectKey{Namespace: o.metalNamespace, Name: node.Name}, serverClaim); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, cloudprovider.InstanceNotFound
-		}
-		return nil, fmt.Errorf("failed to get server claim object for node %s: %w", node.Name, err)
+	var serverClaim *metalv1alpha1.ServerClaim
+
+	serverClaim, err := o.getServerClaimForNode(ctx, node)
+	if err != nil {
+		return nil, err
 	}
 
-	//add label for clusterName to server claim object
+	if serverClaim == nil {
+		return nil, cloudprovider.InstanceNotFound
+	}
+
+	// Add label for clusterName to server claim object
 	serverClaimBase := serverClaim.DeepCopy()
 	if serverClaim.Labels == nil {
 		serverClaim.Labels = make(map[string]string)
@@ -141,5 +145,55 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		NodeAddresses: addresses,
 		Zone:          zone,
 		Region:        region,
+	}, nil
+}
+
+func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *corev1.Node) (*metalv1alpha1.ServerClaim, error) {
+	var serverClaim *metalv1alpha1.ServerClaim
+	if node.Spec.ProviderID != "" {
+		return o.getServerClaimFromProviderID(ctx, node.Spec.ProviderID)
+	}
+
+	serverClaimList := &metalv1alpha1.ServerClaimList{}
+	if err := o.metalClient.List(ctx, serverClaimList, client.InNamespace(o.metalNamespace)); err != nil {
+		return nil, fmt.Errorf("failed to list server claims for node %s: %w", node.Name, err)
+	}
+
+	for _, claim := range serverClaimList.Items {
+		server := &metalv1alpha1.Server{}
+		if err := o.metalClient.Get(ctx, client.ObjectKey{Name: claim.Spec.ServerRef.Name}, server); err != nil {
+			return nil, fmt.Errorf("failed to get server object for node %s: %w", node.Name, err)
+		}
+		if nodeInfo := node.Status.NodeInfo; nodeInfo.SystemUUID == server.Spec.UUID {
+			return &claim, nil
+		}
+	}
+
+	return serverClaim, nil
+}
+
+func (o *metalInstancesV2) getServerClaimFromProviderID(ctx context.Context, providerID string) (*metalv1alpha1.ServerClaim, error) {
+	objKey, err := getObjectKeyFromProviderID(providerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object key for ProviderID %s: %w", providerID, err)
+	}
+	serverClaim := &metalv1alpha1.ServerClaim{}
+	if err := o.metalClient.Get(ctx, objKey, serverClaim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, cloudprovider.InstanceNotFound
+		}
+		return nil, fmt.Errorf("failed to get server claim object for ProviderID %s: %w", providerID, err)
+	}
+	return serverClaim, nil
+}
+
+func getObjectKeyFromProviderID(providerID string) (client.ObjectKey, error) {
+	parts := strings.Split(strings.TrimPrefix(providerID, fmt.Sprintf("%s://", ProviderName)), "/")
+	if len(parts) != 2 {
+		return client.ObjectKey{}, fmt.Errorf("invalid format of ProviderID %s", providerID)
+	}
+	return client.ObjectKey{
+		Namespace: parts[0],
+		Name:      parts[1],
 	}, nil
 }

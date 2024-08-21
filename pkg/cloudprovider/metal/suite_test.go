@@ -40,7 +40,7 @@ var (
 
 const (
 	pollingInterval      = 50 * time.Millisecond
-	eventuallyTimeout    = 10 * time.Second
+	eventuallyTimeout    = 3 * time.Second
 	consistentlyDuration = 1 * time.Second
 )
 
@@ -145,7 +145,9 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		defer func() {
 			_ = cloudConfigFile.Close()
 		}()
-		cloudConfig := CloudConfig{ClusterName: clusterName}
+		cloudConfig := CloudConfig{
+			ClusterName: clusterName,
+		}
 		cloudConfigData, err := yaml.Marshal(&cloudConfig)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cloudConfigFile.Name(), cloudConfigData, 0666)).To(Succeed())
@@ -156,7 +158,7 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		k8sClientSet, err := kubernetes.NewForConfig(cfg)
 		Expect(err).NotTo(HaveOccurred())
 
-		clientBuilder := clientbuilder.NewDynamicClientBuilder(testEnv.Config, k8sClientSet.CoreV1(), "default")
+		clientBuilder := clientbuilder.NewDynamicClientBuilder(testEnv.Config, k8sClientSet.CoreV1(), ns.Name)
 		cp, err = cloudprovider.InitCloudProvider(ProviderName, cloudConfigFile.Name())
 		Expect(err).NotTo(HaveOccurred())
 		cp.Initialize(clientBuilder, cloudProviderCtx.Done())
