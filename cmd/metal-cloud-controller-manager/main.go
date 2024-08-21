@@ -61,7 +61,7 @@ func cloudInitializer(config *cloudcontrollerconfig.CompletedConfig) cloudprovid
 		klog.Fatalf("Cloud provider is nil")
 	}
 
-	if !cloud.HasClusterID() {
+	if cloud != nil && !cloud.HasClusterID() {
 		if config.ComponentConfig.KubeCloudShared.AllowUntaggedCloud {
 			klog.Warning("detected a cluster without a ClusterID. A ClusterID will be required in the future. Please tag your cluster to avoid any future issues.")
 		} else {
