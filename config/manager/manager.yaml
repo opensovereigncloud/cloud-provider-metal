@@ -60,6 +60,7 @@ spec:
       schedulerName: default-scheduler
       terminationGracePeriodSeconds: 30
       serviceAccountName: manager
+      hostNetwork: true
       tolerations:
         - key: node.cloudprovider.kubernetes.io/uninitialized
           value: "true"
