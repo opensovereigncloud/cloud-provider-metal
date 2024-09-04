@@ -28,6 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
+LABEL source_repository="https://github.com/ironcore-dev/cloud-provider-metal"
 WORKDIR /
 COPY --from=builder /workspace/manager /metal-cloud-controller-manager
 USER 65532:65532

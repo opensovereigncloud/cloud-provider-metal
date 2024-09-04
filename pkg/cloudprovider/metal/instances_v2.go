@@ -164,7 +164,8 @@ func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *core
 		if err := o.metalClient.Get(ctx, client.ObjectKey{Name: claim.Spec.ServerRef.Name}, server); err != nil {
 			return nil, fmt.Errorf("failed to get server object for node %s: %w", node.Name, err)
 		}
-		if nodeInfo := node.Status.NodeInfo; nodeInfo.SystemUUID == server.Spec.UUID {
+		//Avoid case mismatch by converting to lower case
+		if nodeInfo := node.Status.NodeInfo; nodeInfo.SystemUUID == strings.ToLower(server.Spec.UUID) {
 			return &claim, nil
 		}
 	}
