@@ -98,7 +98,7 @@ var _ = Describe("InstancesV2", func() {
 		instanceMetadata, err := instancesProvider.InstanceMetadata(ctx, node)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(instanceMetadata).Should(SatisfyAll(
-			HaveField("ProviderID", getProviderIDForServerClaim(serverClaim)),
+			HaveField("ProviderID", getProviderID(serverClaim.Namespace, serverClaim.Name)),
 			HaveField("InstanceType", "foo"),
 			HaveField("NodeAddresses", ContainElements(
 				corev1.NodeAddress{
@@ -163,7 +163,7 @@ var _ = Describe("InstancesV2", func() {
 				GenerateName: "test-",
 			},
 			Spec: corev1.NodeSpec{
-				ProviderID: getProviderIDForServerClaim(serverClaim),
+				ProviderID: getProviderID(serverClaim.Namespace, serverClaim.Name),
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -183,7 +183,7 @@ var _ = Describe("InstancesV2", func() {
 		instanceMetadata, err := instancesProvider.InstanceMetadata(ctx, node)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(instanceMetadata).Should(SatisfyAll(
-			HaveField("ProviderID", getProviderIDForServerClaim(serverClaim)),
+			HaveField("ProviderID", getProviderID(serverClaim.Namespace, serverClaim.Name)),
 			HaveField("InstanceType", "foo"),
 			HaveField("NodeAddresses", ContainElements(
 				corev1.NodeAddress{
@@ -207,7 +207,7 @@ var _ = Describe("InstancesV2", func() {
 				Name: "foo",
 			},
 			Spec: corev1.NodeSpec{
-				ProviderID: fmt.Sprintf("%s://%s/foo/bar", ProviderName, ns.Name),
+				ProviderID: getProviderID(ns.Name, "bar"),
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -251,3 +251,7 @@ var _ = Describe("InstancesV2", func() {
 		Expect(ok).To(BeFalse())
 	})
 })
+
+func getProviderID(namespace, serverClaimName string) string {
+	return fmt.Sprintf("%s://%s/%s", ProviderName, namespace, serverClaimName)
+}
