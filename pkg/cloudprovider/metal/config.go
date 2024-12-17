@@ -22,13 +22,13 @@ type CloudProviderConfig struct {
 	cloudConfig CloudConfig
 }
 
-type NetworkingOpts struct {
+type Networking struct {
 	ConfigureNodeAddresses bool `json:"configureNodeAddresses"`
 }
 
 type CloudConfig struct {
-	ClusterName string         `json:"clusterName"`
-	Networking  NetworkingOpts `json:"networkingOpts"`
+	ClusterName string     `json:"clusterName"`
+	Networking  Networking `json:"networking"`
 }
 
 var (

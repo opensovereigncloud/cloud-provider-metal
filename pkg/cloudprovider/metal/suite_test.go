@@ -147,7 +147,7 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		}()
 		cloudConfig := CloudConfig{
 			ClusterName: clusterName,
-			Networking: NetworkingOpts{
+			Networking: Networking{
 				ConfigureNodeAddresses: true,
 			},
 		}
