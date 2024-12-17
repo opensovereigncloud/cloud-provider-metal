@@ -20,15 +20,15 @@ type metalInstancesV2 struct {
 	targetClient   client.Client
 	metalClient    client.Client
 	metalNamespace string
-	clusterName    string
+	cloudConfig    CloudConfig
 }
 
-func newMetalInstancesV2(targetClient client.Client, metalClient client.Client, namespace, clusterName string) cloudprovider.InstancesV2 {
+func newMetalInstancesV2(targetClient client.Client, metalClient client.Client, namespace string, cloudConfig CloudConfig) cloudprovider.InstancesV2 {
 	return &metalInstancesV2{
 		targetClient:   targetClient,
 		metalClient:    metalClient,
 		metalNamespace: namespace,
-		clusterName:    clusterName,
+		cloudConfig:    cloudConfig,
 	}
 }
 
@@ -98,7 +98,7 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 	if serverClaim.Labels == nil {
 		serverClaim.Labels = make(map[string]string)
 	}
-	serverClaim.Labels[LabelKeyClusterName] = o.clusterName
+	serverClaim.Labels[LabelKeyClusterName] = o.cloudConfig.ClusterName
 	klog.V(2).InfoS("Adding cluster name label to server claim object", "ServerClaim", client.ObjectKeyFromObject(serverClaim), "Node", node.Name)
 	if err := o.metalClient.Patch(ctx, serverClaim, client.MergeFrom(serverClaimBase)); err != nil {
 		return nil, fmt.Errorf("failed to patch server claim for Node %s: %w", node.Name, err)
@@ -139,13 +139,16 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		klog.V(2).InfoS("No region label found for node instance", "Node", node.Name)
 	}
 
-	return &cloudprovider.InstanceMetadata{
-		ProviderID:    providerID,
-		InstanceType:  instanceType,
-		NodeAddresses: addresses,
-		Zone:          zone,
-		Region:        region,
-	}, nil
+	metaData := &cloudprovider.InstanceMetadata{
+		ProviderID:   providerID,
+		InstanceType: instanceType,
+		Zone:         zone,
+		Region:       region,
+	}
+	if o.cloudConfig.Networking.ConfigureNodeAddresses {
+		metaData.NodeAddresses = addresses
+	}
+	return metaData, nil
 }
 
 func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *corev1.Node) (*metalv1alpha1.ServerClaim, error) {

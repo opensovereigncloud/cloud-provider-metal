@@ -147,6 +147,9 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		}()
 		cloudConfig := CloudConfig{
 			ClusterName: clusterName,
+			Networking: NetworkingOpts{
+				ConfigureNodeAddresses: true,
+			},
 		}
 		cloudConfigData, err := yaml.Marshal(&cloudConfig)
 		Expect(err).NotTo(HaveOccurred())
