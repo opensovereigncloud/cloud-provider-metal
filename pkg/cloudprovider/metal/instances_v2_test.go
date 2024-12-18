@@ -4,30 +4,30 @@
 package metal
 
 import (
-	"context"
 	"fmt"
-	"os"
-
-	"k8s.io/client-go/tools/clientcmd"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/controller-manager/pkg/clientbuilder"
 	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
-	"sigs.k8s.io/yaml"
+)
+
+var (
+	instancesProvider cloudprovider.InstancesV2
+	clusterName       = "test"
 )
 
 var _ = Describe("InstancesV2", func() {
-	var (
-		instancesProvider cloudprovider.InstancesV2
-	)
-	ns, cp, clusterName := SetupTest()
+	cloudConfig := CloudConfig{
+		ClusterName: clusterName,
+		Networking: Networking{
+			ConfigureNodeAddresses: true,
+		},
+	}
+	ns, cp, clusterName := SetupTest(cloudConfig)
 
 	BeforeEach(func() {
 		By("Instantiating the instances v2 provider")
@@ -258,68 +258,25 @@ var _ = Describe("InstancesV2", func() {
 		Expect(err).To(Equal(cloudprovider.InstanceNotFound))
 		Expect(ok).To(BeFalse())
 	})
+})
+
+var _ = Describe("InstancesV2", func() {
+	cloudConfig := CloudConfig{
+		ClusterName: clusterName,
+		Networking: Networking{
+			ConfigureNodeAddresses: false,
+		},
+	}
+	ns, cp, clusterName := SetupTest(cloudConfig)
+
+	BeforeEach(func() {
+		By("Instantiating the instances v2 provider")
+		var ok bool
+		instancesProvider, ok = (*cp).InstancesV2()
+		Expect(ok).To(BeTrue())
+	})
 
 	It("Should not configure node addresses if ConfigureNodeAddresses is false", func(ctx SpecContext) {
-		By("Starting up a cloud provider with cloud config to disable node address configuration")
-		user, err := testEnv.AddUser(envtest.User{
-			Name:   "dummy",
-			Groups: []string{"system:authenticated", "system:masters"},
-		}, nil)
-		Expect(err).NotTo(HaveOccurred())
-
-		kubeconfigData, err := user.KubeConfig()
-		Expect(err).NotTo(HaveOccurred())
-
-		clientConfig, err := clientcmd.Load(kubeconfigData)
-		Expect(err).NotTo(HaveOccurred())
-		clientConfig.Contexts[clientConfig.CurrentContext].Namespace = ns.Name
-
-		namespacedKubeconfigData, err := clientcmd.Write(*clientConfig)
-		Expect(err).NotTo(HaveOccurred())
-
-		kubeconfigFile, err := os.CreateTemp(GinkgoT().TempDir(), "kubeconfig")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = kubeconfigFile.Close()
-		}()
-		Expect(os.WriteFile(kubeconfigFile.Name(), namespacedKubeconfigData, 0666)).To(Succeed())
-
-		curr := MetalKubeconfigPath
-		defer func() {
-			MetalKubeconfigPath = curr
-		}()
-		MetalKubeconfigPath = kubeconfigFile.Name()
-
-		cloudConfigFile, err := os.CreateTemp(GinkgoT().TempDir(), "cloud.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = cloudConfigFile.Close()
-		}()
-		cloudConfig := CloudConfig{
-			ClusterName: clusterName,
-			Networking: Networking{
-				ConfigureNodeAddresses: false,
-			},
-		}
-		cloudConfigData, err := yaml.Marshal(&cloudConfig)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(cloudConfigFile.Name(), cloudConfigData, 0666)).To(Succeed())
-
-		cloudProviderCtx, cancel := context.WithCancel(context.Background())
-		DeferCleanup(cancel)
-
-		k8sClientSet, err := kubernetes.NewForConfig(cfg)
-		Expect(err).NotTo(HaveOccurred())
-
-		clientBuilder := clientbuilder.NewDynamicClientBuilder(testEnv.Config, k8sClientSet.CoreV1(), ns.Name)
-		cp, err := cloudprovider.InitCloudProvider(ProviderName, cloudConfigFile.Name())
-		Expect(err).NotTo(HaveOccurred())
-		cp.Initialize(clientBuilder, cloudProviderCtx.Done())
-
-		By("Instantiating the instances v2 provider")
-		instancesProvider, ok := cp.InstancesV2()
-		Expect(ok).To(BeTrue())
-
 		By("Creating a Server")
 		server := &metalv1alpha1.Server{
 			ObjectMeta: metav1.ObjectMeta{
@@ -374,7 +331,7 @@ var _ = Describe("InstancesV2", func() {
 		DeferCleanup(k8sClient.Delete, node)
 
 		By("Ensuring that an instance for a Node exists")
-		ok, err = instancesProvider.InstanceExists(ctx, node)
+		ok, err := instancesProvider.InstanceExists(ctx, node)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
 
