@@ -260,7 +260,7 @@ var _ = Describe("InstancesV2", func() {
 	})
 })
 
-var _ = Describe("InstancesV2", func() {
+var _ = Describe("InstancesV2 with modified CloudConfig", func() {
 	cloudConfig := CloudConfig{
 		ClusterName: clusterName,
 		Networking: Networking{
