@@ -80,7 +80,12 @@ func (o *cloud) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, 
 		log.Fatalf("Failed to create new cluster: %v", err)
 	}
 
-	o.instancesV2 = newMetalInstancesV2(o.targetCluster.GetClient(), o.metalCluster.GetClient(), o.metalNamespace, o.cloudConfig.ClusterName)
+	o.instancesV2 = newMetalInstancesV2(
+		o.targetCluster.GetClient(),
+		o.metalCluster.GetClient(),
+		o.metalNamespace,
+		o.cloudConfig,
+	)
 
 	if err := o.metalCluster.GetFieldIndexer().IndexField(ctx, &metalv1alpha1.ServerClaim{}, serverClaimMetadataUIDField, func(object client.Object) []string {
 		serverClaim := object.(*metalv1alpha1.ServerClaim)

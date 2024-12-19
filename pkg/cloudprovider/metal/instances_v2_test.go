@@ -15,11 +15,19 @@ import (
 	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
 )
 
+var (
+	instancesProvider cloudprovider.InstancesV2
+	clusterName       = "test"
+)
+
 var _ = Describe("InstancesV2", func() {
-	var (
-		instancesProvider cloudprovider.InstancesV2
-	)
-	ns, cp, clusterName := SetupTest()
+	cloudConfig := CloudConfig{
+		ClusterName: clusterName,
+		Networking: Networking{
+			ConfigureNodeAddresses: true,
+		},
+	}
+	ns, cp, clusterName := SetupTest(cloudConfig)
 
 	BeforeEach(func() {
 		By("Instantiating the instances v2 provider")
@@ -249,6 +257,103 @@ var _ = Describe("InstancesV2", func() {
 		ok, err := instancesProvider.InstanceShutdown(ctx, node)
 		Expect(err).To(Equal(cloudprovider.InstanceNotFound))
 		Expect(ok).To(BeFalse())
+	})
+})
+
+var _ = Describe("InstancesV2 with modified CloudConfig", func() {
+	cloudConfig := CloudConfig{
+		ClusterName: clusterName,
+		Networking: Networking{
+			ConfigureNodeAddresses: false,
+		},
+	}
+	ns, cp, clusterName := SetupTest(cloudConfig)
+
+	BeforeEach(func() {
+		By("Instantiating the instances v2 provider")
+		var ok bool
+		instancesProvider, ok = (*cp).InstancesV2()
+		Expect(ok).To(BeTrue())
+	})
+
+	It("Should not configure node addresses if ConfigureNodeAddresses is false", func(ctx SpecContext) {
+		By("Creating a Server")
+		server := &metalv1alpha1.Server{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "test-",
+				Labels: map[string]string{
+					"instance-type": "foo",
+					"zone":          "a",
+					"region":        "bar",
+				},
+			},
+			Spec: metalv1alpha1.ServerSpec{
+				UUID:  "12345",
+				Power: "On",
+			},
+		}
+		Expect(k8sClient.Create(ctx, server)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, server)
+
+		By("Patching the Server object to have a valid network interface status")
+		Eventually(UpdateStatus(server, func() {
+			server.Status.PowerState = metalv1alpha1.ServerOnPowerState
+			server.Status.NetworkInterfaces = []metalv1alpha1.NetworkInterface{{
+				Name: "my-nic",
+				IP:   metalv1alpha1.MustParseIP("10.0.0.1"),
+			}}
+		})).Should(Succeed())
+
+		By("Creating a ServerClaim for a Node")
+		serverClaim := &metalv1alpha1.ServerClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:    ns.Name,
+				GenerateName: "test-",
+			},
+			Spec: metalv1alpha1.ServerClaimSpec{
+				Power:     "On",
+				ServerRef: &corev1.LocalObjectReference{Name: server.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, serverClaim)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, serverClaim)
+
+		By("Creating a Node object with a provider ID referencing the machine")
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "test-",
+			},
+			Spec: corev1.NodeSpec{
+				ProviderID: getProviderID(serverClaim.Namespace, serverClaim.Name),
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, node)
+
+		By("Ensuring that an instance for a Node exists")
+		ok, err := instancesProvider.InstanceExists(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+
+		By("Ensuring that the instance is not shut down")
+		ok, err = instancesProvider.InstanceShutdown(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeFalse())
+
+		By("Ensuring that the instance meta data has empty addresses")
+		instanceMetadata, err := instancesProvider.InstanceMetadata(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(instanceMetadata).Should(SatisfyAll(
+			HaveField("ProviderID", getProviderID(serverClaim.Namespace, serverClaim.Name)),
+			HaveField("InstanceType", "foo"),
+			HaveField("NodeAddresses", BeEmpty()),
+			HaveField("Zone", "a"),
+			HaveField("Region", "bar")))
+
+		By("Ensuring cluster name label is added to ServerClaim object")
+		Eventually(Object(serverClaim)).Should(SatisfyAll(
+			HaveField("Labels", map[string]string{LabelKeyClusterName: clusterName}),
+		))
 	})
 })
 

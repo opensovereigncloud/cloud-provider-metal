@@ -97,11 +97,10 @@ var _ = BeforeSuite(func() {
 	SetClient(k8sClient)
 })
 
-func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
+func SetupTest(cloudConfig CloudConfig) (*corev1.Namespace, *cloudprovider.Interface, string) {
 	var (
-		ns          = &corev1.Namespace{}
-		cp          cloudprovider.Interface
-		clusterName = "test"
+		ns = &corev1.Namespace{}
+		cp cloudprovider.Interface
 	)
 
 	BeforeEach(func(ctx SpecContext) {
@@ -145,9 +144,6 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		defer func() {
 			_ = cloudConfigFile.Close()
 		}()
-		cloudConfig := CloudConfig{
-			ClusterName: clusterName,
-		}
 		cloudConfigData, err := yaml.Marshal(&cloudConfig)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cloudConfigFile.Name(), cloudConfigData, 0666)).To(Succeed())
@@ -164,5 +160,5 @@ func SetupTest() (*corev1.Namespace, *cloudprovider.Interface, string) {
 		cp.Initialize(clientBuilder, cloudProviderCtx.Done())
 	})
 
-	return ns, &cp, clusterName
+	return ns, &cp, cloudConfig.ClusterName
 }

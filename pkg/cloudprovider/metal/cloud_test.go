@@ -9,7 +9,13 @@ import (
 )
 
 var _ = Describe("Cloud", func() {
-	_, cp, _ := SetupTest()
+	cloudConfig := CloudConfig{
+		ClusterName: clusterName,
+		Networking: Networking{
+			ConfigureNodeAddresses: true,
+		},
+	}
+	_, cp, _ := SetupTest(cloudConfig)
 
 	It("should ensure the correct cloud provider setup", func() {
 		Expect((*cp).HasClusterID()).To(BeTrue())
