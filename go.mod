@@ -3,20 +3,20 @@ module github.com/ironcore-dev/cloud-provider-metal
 go 1.23.0
 
 require (
-	github.com/ironcore-dev/controller-utils v0.9.6
+	github.com/ironcore-dev/controller-utils v0.9.7
 	github.com/ironcore-dev/metal-operator v0.0.0-20241009145147-7ccca8caf3b1
 	github.com/onsi/ginkgo/v2 v2.22.2
 	github.com/onsi/gomega v1.36.2
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/pflag v1.0.5
-	k8s.io/api v0.31.1
-	k8s.io/apimachinery v0.31.1
-	k8s.io/client-go v0.31.1
+	k8s.io/api v0.31.4
+	k8s.io/apimachinery v0.31.4
+	k8s.io/client-go v0.31.4
 	k8s.io/cloud-provider v0.31.1
-	k8s.io/component-base v0.31.1
+	k8s.io/component-base v0.31.4
 	k8s.io/controller-manager v0.31.1
 	k8s.io/klog/v2 v2.130.1
-	sigs.k8s.io/controller-runtime v0.19.0
+	sigs.k8s.io/controller-runtime v0.19.4
 	sigs.k8s.io/yaml v1.4.0
 )
 
@@ -107,10 +107,10 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.31.0 // indirect
-	k8s.io/apiserver v0.31.1 // indirect
+	k8s.io/apiextensions-apiserver v0.31.4 // indirect
+	k8s.io/apiserver v0.31.4 // indirect
 	k8s.io/component-helpers v0.31.1 // indirect
-	k8s.io/kms v0.31.1 // indirect
+	k8s.io/kms v0.31.4 // indirect
 	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.30.3 // indirect
