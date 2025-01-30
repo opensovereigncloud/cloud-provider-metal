@@ -22,8 +22,15 @@ type CloudProviderConfig struct {
 	cloudConfig CloudConfig
 }
 
+// IPAMKind specifies the IPAM resources in-use.
+type IPAMKind struct {
+	APIGroup string `json:"apiGroup"`
+	Kind     string `json:"kind"`
+}
+
 type Networking struct {
-	ConfigureNodeAddresses bool `json:"configureNodeAddresses"`
+	ConfigureNodeAddresses bool      `json:"configureNodeAddresses"`
+	IPAMKind               *IPAMKind `json:"ipamKind"`
 }
 
 type CloudConfig struct {
@@ -73,8 +80,6 @@ func LoadCloudProviderConfig(f io.Reader) (*CloudProviderConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get namespace from metal kubeconfig: %w", err)
 	}
-	// TODO: empty or unset namespace will be defaulted to the 'default' namespace. We might want to handle this
-	// as an error.
 	if namespace == "" {
 		return nil, fmt.Errorf("got a empty namespace from metal kubeconfig")
 	}
