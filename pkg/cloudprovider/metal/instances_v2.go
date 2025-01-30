@@ -5,9 +5,11 @@ package metal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	ipamv1alpha1 "github.com/ironcore-dev/ipam/api/ipam/v1alpha1"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -109,15 +111,6 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		return nil, fmt.Errorf("failed to get server object for node %s: %w", node.Name, err)
 	}
 
-	// collect internal Node IPs
-	addresses := make([]corev1.NodeAddress, 0, len(server.Status.NetworkInterfaces))
-	for _, iface := range server.Status.NetworkInterfaces {
-		addresses = append(addresses, corev1.NodeAddress{
-			Type:    corev1.NodeInternalIP,
-			Address: iface.IP.String(),
-		})
-	}
-
 	providerID := node.Spec.ProviderID
 	if providerID == "" {
 		providerID = fmt.Sprintf("%s://%s/%s", ProviderName, o.metalNamespace, serverClaim.Name)
@@ -145,10 +138,42 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		Zone:         zone,
 		Region:       region,
 	}
-	if o.cloudConfig.Networking.ConfigureNodeAddresses {
-		metaData.NodeAddresses = addresses
+	if metaData.NodeAddresses, err = o.getNodeAddresses(ctx, server, serverClaim); err != nil {
+		return nil, err
 	}
 	return metaData, nil
+}
+
+func (o *metalInstancesV2) getNodeAddresses(ctx context.Context, server *metalv1alpha1.Server, claim *metalv1alpha1.ServerClaim) ([]corev1.NodeAddress, error) {
+	addresses := make([]corev1.NodeAddress, 0)
+	if !o.cloudConfig.Networking.ConfigureNodeAddresses {
+		return addresses, nil
+	}
+	if o.cloudConfig.Networking.IPAMKind == nil {
+		for _, iface := range server.Status.NetworkInterfaces {
+			addresses = append(addresses, corev1.NodeAddress{
+				Type:    corev1.NodeInternalIP,
+				Address: iface.IP.String(),
+			})
+		}
+		return addresses, nil
+	}
+	ipamKind := o.cloudConfig.Networking.IPAMKind
+	if ipamKind.APIGroup == ipamv1alpha1.SchemeGroupVersion.Group && ipamKind.Kind == "IP" {
+		var ip ipamv1alpha1.IP
+		if err := o.metalClient.Get(ctx, client.ObjectKeyFromObject(claim), &ip); err != nil {
+			return nil, err
+		}
+		if ip.Status.State != ipamv1alpha1.CFinishedIPState || ip.Status.Reserved == nil {
+			return addresses, errors.New("ip is not allocated")
+		}
+		addresses = append(addresses, corev1.NodeAddress{
+			Type:    corev1.NodeInternalIP,
+			Address: ip.Status.Reserved.String(),
+		})
+		return addresses, nil
+	}
+	return nil, errors.New("unknown ipamKind used for node ip address assignment")
 }
 
 func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *corev1.Node) (*metalv1alpha1.ServerClaim, error) {
