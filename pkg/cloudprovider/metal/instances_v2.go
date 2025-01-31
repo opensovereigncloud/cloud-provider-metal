@@ -177,7 +177,6 @@ func (o *metalInstancesV2) getNodeAddresses(ctx context.Context, server *metalv1
 }
 
 func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *corev1.Node) (*metalv1alpha1.ServerClaim, error) {
-	var serverClaim *metalv1alpha1.ServerClaim
 	if node.Spec.ProviderID != "" {
 		return o.getServerClaimFromProviderID(ctx, node.Spec.ProviderID)
 	}
@@ -188,6 +187,9 @@ func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *core
 	}
 
 	for _, claim := range serverClaimList.Items {
+		if claim.Spec.ServerRef == nil {
+			continue
+		}
 		server := &metalv1alpha1.Server{}
 		if err := o.metalClient.Get(ctx, client.ObjectKey{Name: claim.Spec.ServerRef.Name}, server); err != nil {
 			return nil, fmt.Errorf("failed to get server object for node %s: %w", node.Name, err)
@@ -197,8 +199,7 @@ func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *core
 			return &claim, nil
 		}
 	}
-
-	return serverClaim, nil
+	return nil, nil
 }
 
 func (o *metalInstancesV2) getServerClaimFromProviderID(ctx context.Context, providerID string) (*metalv1alpha1.ServerClaim, error) {
