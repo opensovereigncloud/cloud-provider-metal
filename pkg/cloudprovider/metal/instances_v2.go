@@ -159,7 +159,8 @@ func (o *metalInstancesV2) getNodeAddresses(ctx context.Context, server *metalv1
 		return addresses, nil
 	}
 	ipamKind := o.cloudConfig.Networking.IPAMKind
-	if ipamKind.APIGroup == ipamv1alpha1.SchemeGroupVersion.Group && ipamKind.Kind == "IP" {
+	ipamv1alpha1APIGroup := ipamv1alpha1.SchemeGroupVersion.Group + "/" + ipamv1alpha1.SchemeGroupVersion.Version
+	if ipamKind.APIGroup == ipamv1alpha1APIGroup && ipamKind.Kind == "IP" {
 		var ip ipamv1alpha1.IP
 		if err := o.metalClient.Get(ctx, client.ObjectKeyFromObject(claim), &ip); err != nil {
 			return nil, err
