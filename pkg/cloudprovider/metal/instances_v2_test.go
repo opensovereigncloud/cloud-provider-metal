@@ -472,21 +472,16 @@ var _ = Describe("InstancesV2 with ironcore ipam", func() {
 				Address: "100.10.17.18",
 			})),
 			HaveField("Zone", "a"),
-			HaveField("Region", "bar")))
-
-		By("Ensuring cluster name label is added to ServerClaim object")
-		Eventually(Object(serverClaim)).Should(SatisfyAll(
-			HaveField("Labels", map[string]string{LabelKeyClusterName: clusterName}),
-		))
-
-		By("Ensuring that the instance meta data has additional labels")
-		Eventually(instanceMetadata).Should(Satisfy(
+			HaveField("Region", "bar"),
 			HaveField("AdditionalLabels", map[string]string{
 				LabelInstanceType:          "foo",
 				corev1.LabelTopologyZone:   "a",
 				corev1.LabelTopologyRegion: "bar",
 				"additionalLabel":          "qux",
-			}),
+			})))
+		By("Ensuring cluster name label is added to ServerClaim object")
+		Eventually(Object(serverClaim)).Should(SatisfyAll(
+			HaveField("Labels", map[string]string{LabelKeyClusterName: clusterName}),
 		))
 	})
 })
