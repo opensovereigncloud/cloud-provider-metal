@@ -44,9 +44,9 @@ var _ = Describe("InstancesV2", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "test-",
 				Labels: map[string]string{
-					"instance-type": "foo",
-					"zone":          "a",
-					"region":        "bar",
+					metalv1alpha1.InstanceTypeAnnotation: "foo",
+					corev1.LabelTopologyZone:             "a",
+					corev1.LabelTopologyRegion:           "bar",
 				},
 			},
 			Spec: metalv1alpha1.ServerSpec{
@@ -131,9 +131,9 @@ var _ = Describe("InstancesV2", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "test-",
 				Labels: map[string]string{
-					"instance-type": "foo",
-					"zone":          "a",
-					"region":        "bar",
+					metalv1alpha1.InstanceTypeAnnotation: "foo",
+					corev1.LabelTopologyZone:             "a",
+					corev1.LabelTopologyRegion:           "bar",
 				},
 			},
 			Spec: metalv1alpha1.ServerSpec{
@@ -284,9 +284,9 @@ var _ = Describe("InstancesV2 with configure node addresses false", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "test-",
 				Labels: map[string]string{
-					"instance-type": "foo",
-					"zone":          "a",
-					"region":        "bar",
+					metalv1alpha1.InstanceTypeAnnotation: "foo",
+					corev1.LabelTopologyZone:             "a",
+					corev1.LabelTopologyRegion:           "bar",
 				},
 			},
 			Spec: metalv1alpha1.ServerSpec{
@@ -385,9 +385,10 @@ var _ = Describe("InstancesV2 with ironcore ipam", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "test-",
 				Labels: map[string]string{
-					"instance-type": "foo",
-					"zone":          "a",
-					"region":        "bar",
+					metalv1alpha1.InstanceTypeAnnotation: "foo",
+					corev1.LabelTopologyZone:             "a",
+					corev1.LabelTopologyRegion:           "bar",
+					"additionalLabel":                    "qux",
 				},
 			},
 			Spec: metalv1alpha1.ServerSpec{
@@ -471,8 +472,13 @@ var _ = Describe("InstancesV2 with ironcore ipam", func() {
 				Address: "100.10.17.18",
 			})),
 			HaveField("Zone", "a"),
-			HaveField("Region", "bar")))
-
+			HaveField("Region", "bar"),
+			HaveField("AdditionalLabels", map[string]string{
+				metalv1alpha1.InstanceTypeAnnotation: "foo",
+				corev1.LabelTopologyZone:             "a",
+				corev1.LabelTopologyRegion:           "bar",
+				"additionalLabel":                    "qux",
+			})))
 		By("Ensuring cluster name label is added to ServerClaim object")
 		Eventually(Object(serverClaim)).Should(SatisfyAll(
 			HaveField("Labels", map[string]string{LabelKeyClusterName: clusterName}),
