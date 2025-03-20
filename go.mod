@@ -6,7 +6,7 @@ require (
 	github.com/ironcore-dev/controller-utils v0.9.7
 	github.com/ironcore-dev/ipam v0.2.2
 	github.com/ironcore-dev/metal-operator v0.0.0-20250211142353-5d04a2a7dbbd
-	github.com/onsi/ginkgo/v2 v2.23.0
+	github.com/onsi/ginkgo/v2 v2.23.1
 	github.com/onsi/gomega v1.36.2
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/pflag v1.0.6
