@@ -123,6 +123,96 @@ var _ = Describe("InstancesV2", func() {
 		))
 	})
 
+	It("Should power off an annotated server", func(ctx SpecContext) {
+		By("Creating a Server")
+		server := &metalv1alpha1.Server{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "test-",
+			},
+			Spec: metalv1alpha1.ServerSpec{
+				UUID:  "9876",
+				Power: "On",
+			},
+		}
+		Expect(k8sClient.Create(ctx, server)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, server)
+
+		By("Patching the Server object to have a valid network interface status")
+		Eventually(UpdateStatus(server, func() {
+			server.Status.PowerState = metalv1alpha1.ServerOnPowerState
+		})).Should(Succeed())
+
+		By("Creating a ServerClaim for a Node")
+		serverClaim := &metalv1alpha1.ServerClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:    ns.Name,
+				GenerateName: "test-",
+			},
+			Spec: metalv1alpha1.ServerClaimSpec{
+				Power:     "On",
+				ServerRef: &corev1.LocalObjectReference{Name: server.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, serverClaim)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, serverClaim)
+
+		By("Creating a Node object with a provider ID referencing the machine")
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "test-",
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, node)
+
+		By("Updating the SystemUUID in Node status")
+		Eventually(UpdateStatus(node, func() {
+			node.Status.NodeInfo.SystemUUID = "9876"
+		})).Should(Succeed())
+
+		By("Ensuring that an instance for a Node exists")
+		ok, err := instancesProvider.InstanceExists(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+
+		By("Ensuring that the instance is not shut down")
+		ok, err = instancesProvider.InstanceShutdown(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeFalse())
+
+		By("Ensuring that the instance meta data has the correct providerID")
+		instanceMetadata, err := instancesProvider.InstanceMetadata(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(instanceMetadata).Should(SatisfyAll(
+			HaveField("ProviderID", getProviderID(serverClaim.Namespace, serverClaim.Name)),
+		))
+
+		By("Ensuring cluster name label is added to ServerClaim object")
+		Eventually(Object(serverClaim)).Should(HaveField("Spec.Power", metalv1alpha1.PowerOn))
+
+		By("Annotating the node with power off")
+		Eventually(Update(node, func() {
+			node.Annotations = map[string]string{
+				AnnotationPowerOff: "true",
+			}
+		})).Should(Succeed())
+		_, err = instancesProvider.InstanceMetadata(ctx, node)
+		Expect(err).To(Succeed())
+
+		By("Ensuring the ServerClaim is updated to power off")
+		Eventually(Object(serverClaim)).Should(HaveField("Spec.Power", metalv1alpha1.PowerOff))
+
+		By("Removing the power off annotation")
+		Eventually(Update(node, func() {
+			delete(node.Annotations, AnnotationPowerOff)
+		})).Should(Succeed())
+		_, err = instancesProvider.InstanceMetadata(ctx, node)
+		Expect(err).To(Succeed())
+
+		By("Ensuring the ServerClaim is updated to power on")
+		Eventually(Object(serverClaim)).Should(HaveField("Spec.Power", metalv1alpha1.PowerOn))
+	})
+
 	It("Should get instance info for a Node with correct ProviderID", func(ctx SpecContext) {
 		By("Creating a Server")
 		server := &metalv1alpha1.Server{

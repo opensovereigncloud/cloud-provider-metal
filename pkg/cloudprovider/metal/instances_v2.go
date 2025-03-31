@@ -106,6 +106,10 @@ func (o *metalInstancesV2) InstanceMetadata(ctx context.Context, node *corev1.No
 		return nil, fmt.Errorf("failed to patch server claim for Node %s: %w", node.Name, err)
 	}
 
+	if err = o.setServerClaimPower(ctx, node, serverClaim); err != nil {
+		return nil, err
+	}
+
 	server := &metalv1alpha1.Server{}
 	if err := o.metalClient.Get(ctx, client.ObjectKey{Name: serverClaim.Spec.ServerRef.Name}, server); err != nil {
 		return nil, fmt.Errorf("failed to get server object for node %s: %w", node.Name, err)
@@ -172,6 +176,32 @@ func (o *metalInstancesV2) getNodeAddresses(ctx context.Context, server *metalv1
 		return addresses, nil
 	}
 	return nil, errors.New("unknown ipamKind used for node ip address assignment")
+}
+
+// setServerClaimPower ensures that the server claim:
+// - is powered off if the node has the powerOffAnnotation and
+// - is powered on if the node does not have the powerOffAnnotation
+// This does not guarantee that other controllers such as the
+// machine-controller-manager interfere with the power state of the server claim.
+func (o *metalInstancesV2) setServerClaimPower(ctx context.Context, node *corev1.Node, serverClaim *metalv1alpha1.ServerClaim) error {
+	_, powerOff := node.Annotations[AnnotationPowerOff]
+	if powerOff && serverClaim.Spec.Power != metalv1alpha1.PowerOff {
+		klog.InfoS("Ensuring server is powered off", "Node", node.Name)
+		serverClaimBase := serverClaim.DeepCopy()
+		serverClaim.Spec.Power = metalv1alpha1.PowerOff
+		if err := o.metalClient.Patch(ctx, serverClaim, client.MergeFrom(serverClaimBase)); err != nil {
+			return fmt.Errorf("failed to patch server claim for Node %s: %w", node.Name, err)
+		}
+	}
+	if !powerOff && serverClaim.Spec.Power == metalv1alpha1.PowerOff {
+		klog.InfoS("Ensuring server is powered on", "Node", node.Name)
+		serverClaimBase := serverClaim.DeepCopy()
+		serverClaim.Spec.Power = metalv1alpha1.PowerOn
+		if err := o.metalClient.Patch(ctx, serverClaim, client.MergeFrom(serverClaimBase)); err != nil {
+			return fmt.Errorf("failed to patch server claim for Node %s: %w", node.Name, err)
+		}
+	}
+	return nil
 }
 
 func (o *metalInstancesV2) getServerClaimForNode(ctx context.Context, node *corev1.Node) (*metalv1alpha1.ServerClaim, error) {
