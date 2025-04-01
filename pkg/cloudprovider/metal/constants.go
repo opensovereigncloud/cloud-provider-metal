@@ -12,6 +12,8 @@ const (
 	AnnotationKeyServiceNamespace = "service-namespace"
 	// AnnotationKeyServiceUID is the service UID annotation key name
 	AnnotationKeyServiceUID = "service-uid"
+	// AnnotationPowerOff can be set to any value to power off a server
+	AnnotationPowerOff = "metal.ironcore.dev/power-off"
 	// LabelKeyClusterName is the label key name used to identify the cluster name in Kubernetes labels
 	LabelKeyClusterName = "kubernetes.io/cluster"
 )
