@@ -5,14 +5,13 @@ package metal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
-	"reflect"
-	"strings"
 
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -20,6 +19,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+)
+
+const (
+	nodeMaintenanceFinalizer = "metal.ironcore.dev/cloud-provider-metal"
+
+	labelKeyManagedBy      = "app.kubernetes.io/managed-by"
+	cloudProviderMetalName = "cloud-provider-metal"
+
+	serverMaintenancePriority = int32(100)
 )
 
 type NodeReconciler struct {
@@ -41,6 +50,8 @@ func NewNodeReconciler(targetClient client.Client, metalClient client.Client, no
 }
 
 func (r *NodeReconciler) Start(ctx context.Context) error {
+	defer r.queue.ShutDown()
+
 	_, err := r.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			node, ok := obj.(*corev1.Node)
@@ -68,11 +79,9 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 				return
 			}
 			key := client.ObjectKeyFromObject(node)
-			r.queue.Forget(key)
-			r.queue.Done(key)
+			r.queue.Add(key)
 		},
 	})
-	defer r.queue.ShutDown()
 	if err != nil {
 		return fmt.Errorf("failed to add event handler: %w", err)
 	}
@@ -82,11 +91,18 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 			if quit {
 				return
 			}
-			if err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
-				klog.Errorf("Failed to reconcile Node %s: %v", key, err)
-				r.queue.AddRateLimited(key)
-			}
-			r.queue.Done(key)
+
+			func() {
+				defer r.queue.Done(key)
+
+				if err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+					klog.Errorf("Failed to reconcile Node %s: %v", key, err)
+					r.queue.AddRateLimited(key)
+					return
+				}
+
+				r.queue.Forget(key)
+			}()
 		}
 	}()
 	<-ctx.Done()
@@ -106,32 +122,74 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) error 
 		return nil
 	}
 
-	claimName, err := parseProviderID(node.Spec.ProviderID)
-	if err != nil {
-		return err
+	if !node.DeletionTimestamp.IsZero() {
+		klog.V(2).Infof("Node %s is deleting, reconciling delete flow", req.NamespacedName)
+		return r.reconcileDelete(ctx, node)
 	}
 
-	claim := &metalv1alpha1.ServerClaim{}
-	if err := r.metalClient.Get(ctx, claimName, claim); err != nil {
-		return err
+	if err := r.reconcilePodCIDR(ctx, node); err != nil {
+		return fmt.Errorf("unable to reconcile PodCIDR: %w", err)
 	}
-	if claim.Labels == nil {
-		claim.Labels = make(map[string]string)
+
+	if err := r.reconcileMaintenance(ctx, node); err != nil {
+		return fmt.Errorf("unable to reconcile maintenance: %w", err)
 	}
-	maintenanceVal := claim.Labels[metalv1alpha1.ServerMaintenanceNeededLabelKey]
-	approvalVal := node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey]
-	originalClaim := claim.DeepCopy()
-	if maintenanceVal == TrueStr && approvalVal == TrueStr {
-		claim.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
-	} else {
-		delete(claim.Labels, metalv1alpha1.ServerMaintenanceApprovalKey)
+
+	return nil
+}
+
+func (r *NodeReconciler) reconcileDelete(ctx context.Context, node *corev1.Node) error {
+	if !controllerutil.ContainsFinalizer(node, nodeMaintenanceFinalizer) {
+		return nil
 	}
-	if !reflect.DeepEqual(claim, originalClaim) {
-		if err = r.metalClient.Patch(ctx, claim, client.MergeFrom(originalClaim)); err != nil {
-			return err
+
+	serverClaimKey, err := getObjectKeyFromProviderID(node.Spec.ProviderID)
+	if err != nil {
+		klog.Errorf("Node %s has empty/invalid spec.providerID during node deletion: %v. Skipping CR cleanup to unblock node deletion", node.Name, err)
+
+		base := node.DeepCopy()
+		if removed := controllerutil.RemoveFinalizer(node, nodeMaintenanceFinalizer); removed {
+			if patchErr := r.targetClient.Patch(ctx, node, client.MergeFrom(base)); patchErr != nil {
+				return fmt.Errorf("unable to remove finalizer: %w", patchErr)
+			}
+		}
+
+		return nil
+	}
+
+	if err = r.ensureServerMaintenanceNotExists(ctx, serverClaimKey); err != nil {
+		return fmt.Errorf("unable to cleanup ServerMaintenance: %w", err)
+	}
+
+	base := node.DeepCopy()
+	if removed := controllerutil.RemoveFinalizer(node, nodeMaintenanceFinalizer); removed {
+		if err := r.targetClient.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+			return fmt.Errorf("unable to remove finalizer: %w", err)
 		}
 	}
 
+	return nil
+}
+
+func (r *NodeReconciler) ensureServerMaintenanceNotExists(ctx context.Context, key types.NamespacedName) error {
+	maintenance := &metalv1alpha1.ServerMaintenance{}
+	if err := r.metalClient.Get(ctx, key, maintenance); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	if maintenance.Labels == nil || maintenance.Labels[labelKeyManagedBy] != cloudProviderMetalName {
+		klog.Infof("ServerMaintenance %s exists but is not managed by CCM, skipping deletion", key)
+		return nil
+	}
+
+	if err := r.metalClient.Delete(ctx, maintenance); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	return nil
+}
+
+func (r *NodeReconciler) reconcilePodCIDR(ctx context.Context, node *corev1.Node) error {
 	if PodPrefixSize <= 0 {
 		// <= 0 disables automatic assignment of pod CIDR.
 		return nil
@@ -170,31 +228,135 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) error 
 	}
 
 	klog.Info("Node does not have a NodeInternalIP, not setting podCIDR")
-
 	return nil
-}
-
-func parseProviderID(providerID string) (types.NamespacedName, error) {
-	if providerID == "" {
-		return types.NamespacedName{}, errors.New("empty providerID")
-	}
-	provider, rest, ok := strings.Cut(providerID, "://")
-	if !ok || provider == "" {
-		return types.NamespacedName{}, errors.New("invalid providerID: missing scheme")
-	}
-	parts := strings.Split(rest, "/")
-	if len(parts) != 2 {
-		return types.NamespacedName{}, errors.New("invalid providerID: unexpected count of forward slashes")
-	}
-	return types.NamespacedName{Namespace: parts[0], Name: parts[1]}, nil
 }
 
 func zeroHostBits(ip net.IP, maskSize int) net.IP {
 	if ip.To4() != nil {
 		mask := net.CIDRMask(maskSize, 32)
 		return ip.Mask(mask)
-	} else {
-		mask := net.CIDRMask(maskSize, 128)
-		return ip.Mask(mask)
 	}
+
+	mask := net.CIDRMask(maskSize, 128)
+	return ip.Mask(mask)
+}
+
+func (r *NodeReconciler) reconcileMaintenance(ctx context.Context, node *corev1.Node) error {
+	serverClaimKey, err := getObjectKeyFromProviderID(node.Spec.ProviderID)
+	if err != nil {
+		klog.Errorf("Node %s has invalid spec.providerID: %v", node.Name, err)
+		return nil
+	}
+
+	maintenanceKey := serverClaimKey
+	maintenanceRequested := node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] == TrueStr
+
+	if !maintenanceRequested {
+		if err = r.ensureServerMaintenanceNotExists(ctx, maintenanceKey); err != nil {
+			return fmt.Errorf("unable to ensure ServerMaintenance CR not exists: %w", err)
+		}
+
+		base := node.DeepCopy()
+		if removed := controllerutil.RemoveFinalizer(node, nodeMaintenanceFinalizer); removed {
+			if err = r.targetClient.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+				return fmt.Errorf("unable to remove finalizer: %w", err)
+			}
+		}
+	}
+
+	serverClaim := &metalv1alpha1.ServerClaim{}
+	if err = r.metalClient.Get(ctx, serverClaimKey, serverClaim); err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(2).Infof("ServerClaim %s not found, skipping maintenance creation and handshake", serverClaimKey)
+			return nil
+		}
+		return fmt.Errorf("unable to get ServerClaim: %w", err)
+	}
+
+	if serverClaim.Spec.ServerRef == nil {
+		klog.V(2).Infof("ServerClaim %s has empty ServerRef, skipping maintenance logic", serverClaimKey)
+		return nil
+	}
+
+	if maintenanceRequested {
+		base := node.DeepCopy()
+		if added := controllerutil.AddFinalizer(node, nodeMaintenanceFinalizer); added {
+			if err := r.targetClient.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+				return fmt.Errorf("unable to add finalizer: %w", err)
+			}
+		}
+
+		serverName := serverClaim.Spec.ServerRef.Name
+
+		if err = r.ensureServerMaintenanceExists(ctx, maintenanceKey, serverName); err != nil {
+			return fmt.Errorf("unable to ensure ServerMaintenance CR exists: %w", err)
+		}
+	}
+
+	maintenanceNeeded := serverClaim.Labels[metalv1alpha1.ServerMaintenanceNeededLabelKey] == TrueStr
+	maintenanceApproved := node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] == TrueStr
+
+	shouldHaveApproval := maintenanceNeeded && maintenanceApproved
+	hasApproval := serverClaim.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] == TrueStr
+
+	if shouldHaveApproval != hasApproval {
+		if err = r.syncServerClaimApproval(ctx, serverClaim, shouldHaveApproval); err != nil {
+			return fmt.Errorf("unable to sync ServerClaim approval: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *NodeReconciler) ensureServerMaintenanceExists(ctx context.Context, key types.NamespacedName, serverName string) error {
+	maintenance := &metalv1alpha1.ServerMaintenance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrPatch(ctx, r.metalClient, maintenance, func() error {
+
+		if !maintenance.CreationTimestamp.IsZero() {
+			if maintenance.Labels[labelKeyManagedBy] != cloudProviderMetalName {
+				return nil
+			}
+		}
+
+		maintenance.Spec.Policy = metalv1alpha1.ServerMaintenancePolicyOwnerApproval
+		maintenance.Spec.Priority = serverMaintenancePriority
+		maintenance.Spec.ServerRef = &corev1.LocalObjectReference{
+			Name: serverName,
+		}
+
+		if maintenance.Labels == nil {
+			maintenance.Labels = make(map[string]string)
+		}
+		maintenance.Labels[labelKeyManagedBy] = cloudProviderMetalName
+
+		return nil
+	})
+
+	return err
+}
+
+func (r *NodeReconciler) syncServerClaimApproval(ctx context.Context, serverClaim *metalv1alpha1.ServerClaim, shouldHaveApproval bool) error {
+	base := serverClaim.DeepCopy()
+
+	if shouldHaveApproval {
+		if serverClaim.Labels == nil {
+			serverClaim.Labels = make(map[string]string)
+		}
+		serverClaim.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
+
+	} else {
+		delete(serverClaim.Labels, metalv1alpha1.ServerMaintenanceApprovalKey)
+	}
+
+	if err := r.metalClient.Patch(ctx, serverClaim, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("unable to patch ServerClaim approval label: %w", err)
+	}
+
+	return nil
 }

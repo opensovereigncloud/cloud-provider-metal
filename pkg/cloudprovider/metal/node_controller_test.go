@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
@@ -70,7 +71,9 @@ var _ = Describe("NodeReconciler", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, serverClaim)).To(Succeed())
-		DeferCleanup(k8sClient.Delete, serverClaim)
+		DeferCleanup(func(ctx SpecContext) error {
+			return client.IgnoreNotFound(k8sClient.Delete(ctx, serverClaim))
+		})
 
 		By("Creating a Node object with a provider ID referencing the machine")
 		node = &corev1.Node{
@@ -79,7 +82,9 @@ var _ = Describe("NodeReconciler", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		DeferCleanup(k8sClient.Delete, node)
+		DeferCleanup(func(ctx SpecContext) error {
+			return client.IgnoreNotFound(k8sClient.Delete(ctx, node))
+		})
 
 		By("Updating the SystemUUID in Node status")
 		Eventually(UpdateStatus(node, func() {
@@ -99,23 +104,6 @@ var _ = Describe("NodeReconciler", func() {
 		originalNode := node.DeepCopy()
 		node.Spec.ProviderID = meta.ProviderID
 		Expect(k8sClient.Patch(ctx, node, client.MergeFrom(originalNode))).To(Succeed())
-	})
-
-	It("should copy the approval label for a claim requiring maintenance", func(ctx SpecContext) {
-		originalServerClaim := serverClaim.DeepCopy()
-		serverClaim.Labels = map[string]string{
-			metalv1alpha1.ServerMaintenanceNeededLabelKey: TrueStr,
-		}
-		Expect(k8sClient.Patch(ctx, serverClaim, client.MergeFrom(originalServerClaim))).To(Succeed())
-
-		Eventually(Object(node)).Should(HaveField("Labels", HaveKeyWithValue(metalv1alpha1.ServerMaintenanceNeededLabelKey, TrueStr)))
-		Consistently(Object(node)).Should(HaveField("Labels", HaveKeyWithValue(metalv1alpha1.ServerMaintenanceNeededLabelKey, TrueStr)))
-
-		originalNode := node.DeepCopy()
-		node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
-		Expect(k8sClient.Patch(ctx, node, client.MergeFrom(originalNode))).To(Succeed())
-
-		Eventually(Object(serverClaim)).Should(HaveField("Labels", HaveKeyWithValue(metalv1alpha1.ServerMaintenanceApprovalKey, TrueStr)))
 	})
 
 	Context("PodCIDR assignment", func() {
@@ -192,6 +180,323 @@ var _ = Describe("NodeReconciler", func() {
 
 			By("Verifying PodCIDR remains empty despite having NodeInternalIP")
 			Consistently(Object(node)).Should(HaveField("Spec.PodCIDR", ""))
+		})
+	})
+
+	Context("ServerMaintenance CR Lifecycle", func() {
+		It("should create a ServerMaintenance CR when maintenance is requested on the Node", func(ctx SpecContext) {
+			By("Adding the maintenance-requested label to the Node")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			maintenanceCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+				},
+			}
+			Eventually(Get(maintenanceCR)).Should(Succeed())
+
+			By("Verifying the ServerMaintenance CR fields")
+			Expect(maintenanceCR.Spec.Policy).To(Equal(metalv1alpha1.ServerMaintenancePolicyOwnerApproval))
+			Expect(maintenanceCR.Spec.Priority).To(Equal(serverMaintenancePriority))
+			Expect(maintenanceCR.Spec.ServerRef).NotTo(BeNil())
+			Expect(maintenanceCR.Spec.ServerRef.Name).To(Equal(serverClaim.Spec.ServerRef.Name))
+			Expect(maintenanceCR.Labels).To(HaveKeyWithValue(labelKeyManagedBy, cloudProviderMetalName))
+
+			By("Verifying the finalizer is added to the Node")
+			Eventually(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+
+		It("should do nothing if ServerMaintenance CR already exists (idempotency)", func(ctx SpecContext) {
+			existingCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+					Labels: map[string]string{
+						"test-marker": "do-not-overwrite",
+					},
+				},
+				Spec: metalv1alpha1.ServerMaintenanceSpec{
+					Policy:   metalv1alpha1.ServerMaintenancePolicyOwnerApproval,
+					Priority: serverMaintenancePriority,
+					ServerRef: &corev1.LocalObjectReference{
+						Name: serverClaim.Spec.ServerRef.Name,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, existingCR)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, existingCR)
+
+			By("Triggering maintenance requested on the Node")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			By("Ensuring the existing CR is completely untouched by the controller")
+			Consistently(Object(existingCR)).Should(HaveField("Labels", HaveKeyWithValue("test-marker", "do-not-overwrite")))
+
+			By("Verifying the finalizer is present in the Node")
+			Eventually(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+			Consistently(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+
+		It("should NOT overwrite an existing ServerMaintenance CR if it is not managed by the controller", func(ctx SpecContext) {
+			unownedCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+					Labels: map[string]string{
+						labelKeyManagedBy: "admin-user",
+						"custom-marker":   "do-not-touch",
+					},
+				},
+				Spec: metalv1alpha1.ServerMaintenanceSpec{
+					Policy:   metalv1alpha1.ServerMaintenancePolicyOwnerApproval,
+					Priority: 999,
+					ServerRef: &corev1.LocalObjectReference{
+						Name: serverClaim.Spec.ServerRef.Name,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, unownedCR)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, unownedCR)
+
+			By("Triggering maintenance requested on the Node")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			By("Ensuring the unowned CR fields are NOT overwritten")
+			Consistently(Object(unownedCR)).Should(SatisfyAll(
+				HaveField("Spec.Priority", Equal(int32(999))),
+				HaveField("Labels", HaveKeyWithValue(labelKeyManagedBy, "admin-user")),
+				HaveField("Labels", HaveKeyWithValue("custom-marker", "do-not-touch")),
+			))
+
+			Eventually(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+
+		It("should delete the ServerMaintenance CR when the maintenance-requested label is removed", func(ctx SpecContext) {
+			By("Adding the maintenance-requested label to the Node")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			maintenanceCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+				},
+			}
+			Eventually(Get(maintenanceCR)).Should(Succeed())
+
+			By("Removing the maintenance-requested label from the Node")
+			Eventually(Update(node, func() {
+				delete(node.Labels, metalv1alpha1.ServerMaintenanceRequestedLabelKey)
+			})).Should(Succeed())
+
+			By("Verifying the ServerMaintenance CR is deleted")
+			Eventually(Get(maintenanceCR)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+
+			By("Verifying the finalizer is removed from the Node")
+			Eventually(Object(node)).ShouldNot(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+
+		It("should do nothing if the label is absent and CR does not exist (idempotency)", func(ctx SpecContext) {
+			By("Triggering reconciliation by adding a dummy annotation")
+			Eventually(Update(node, func() {
+				if node.Annotations == nil {
+					node.Annotations = make(map[string]string)
+				}
+				node.Annotations["dummy-trigger"] = "true"
+			})).Should(Succeed())
+
+			maintenanceCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+				},
+			}
+
+			By("Ensuring the ServerMaintenance CR is not created")
+			Consistently(Get(maintenanceCR)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+
+			By("Ensuring the finalizer is not added to the Node")
+			Consistently(Object(node)).ShouldNot(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+
+		It("should handle Node deletion by cleaning up the CR and removing the finalizer", func(ctx SpecContext) {
+			By("Triggering maintenance to create CR and add finalizer")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			maintenanceCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+				},
+			}
+
+			Eventually(Get(maintenanceCR)).Should(Succeed())
+			Eventually(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+
+			By("Deleting the Node")
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+
+			By("Verifying the ServerMaintenance CR is deleted first")
+			Eventually(Get(maintenanceCR)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+
+			By("Verifying the Node is completely deleted (finalizer was removed)")
+			Eventually(Get(node)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+		})
+
+		It("should NOT delete the ServerMaintenance CR if it is not managed by the controller", func(ctx SpecContext) {
+			const managedBy = "some-other-controller-or-admin"
+			unownedCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+					Labels: map[string]string{
+						labelKeyManagedBy: managedBy,
+					},
+				},
+				Spec: metalv1alpha1.ServerMaintenanceSpec{
+					Policy:   metalv1alpha1.ServerMaintenancePolicyOwnerApproval,
+					Priority: serverMaintenancePriority,
+					ServerRef: &corev1.LocalObjectReference{
+						Name: serverClaim.Spec.ServerRef.Name,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, unownedCR)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, unownedCR)
+
+			By("Triggering reconciliation by adding a dummy annotation to the Node")
+			Eventually(Update(node, func() {
+				if node.Annotations == nil {
+					node.Annotations = make(map[string]string)
+				}
+				node.Annotations["dummy-trigger"] = "trigger-reconcile"
+			})).Should(Succeed())
+
+			By("Ensuring the unowned ServerMaintenance CR remains untouched")
+			Consistently(Object(unownedCR)).Should(HaveField("Labels", HaveKeyWithValue(labelKeyManagedBy, managedBy)))
+		})
+
+		It("should clean up ServerMaintenance and finalizer even if ServerClaim is deleted", func(ctx SpecContext) {
+			By("1. Triggering maintenance to create CR and add finalizer")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceRequestedLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			maintenanceCR := &metalv1alpha1.ServerMaintenance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serverClaim.Name,
+					Namespace: serverClaim.Namespace,
+				},
+			}
+
+			Eventually(Get(maintenanceCR)).Should(Succeed())
+			Eventually(Object(node)).Should(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+
+			By("2. Deleting the ServerClaim to simulate the edge case")
+			Expect(k8sClient.Delete(ctx, serverClaim)).To(Succeed())
+			Eventually(Get(serverClaim)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+
+			By("3. Removing the maintenance-requested label from the Node")
+			Eventually(Update(node, func() {
+				delete(node.Labels, metalv1alpha1.ServerMaintenanceRequestedLabelKey)
+			})).Should(Succeed())
+
+			By("4. Verifying the ServerMaintenance CR is deleted despite missing ServerClaim")
+			Eventually(Get(maintenanceCR)).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
+
+			By("5. Verifying the finalizer is removed from the Node")
+			Eventually(Object(node)).ShouldNot(HaveField("Finalizers", ContainElement(nodeMaintenanceFinalizer)))
+		})
+	})
+
+	Context("Maintenance Approval Handshake", func() {
+		It("should add the approval label to the ServerClaim when Node is approved", func(ctx SpecContext) {
+			By("Adding maintenance-needed label to the ServerClaim")
+			Eventually(Update(serverClaim, func() {
+				if serverClaim.Labels == nil {
+					serverClaim.Labels = make(map[string]string)
+				}
+				serverClaim.Labels[metalv1alpha1.ServerMaintenanceNeededLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			By("Adding maintenance-approval label to the Node")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
+			})).Should(Succeed())
+
+			By("Verifying the ServerClaim receives the Approval label from the NodeMaintenanceReconciler")
+			Eventually(Object(serverClaim)).Should(HaveField("Labels", HaveKeyWithValue(metalv1alpha1.ServerMaintenanceApprovalKey, TrueStr)))
+		})
+
+		It("should remove the approval label from the ServerClaim when Node loses the approval label", func(ctx SpecContext) {
+			By("Setting up the initial approved state")
+			Eventually(Update(serverClaim, func() {
+				if serverClaim.Labels == nil {
+					serverClaim.Labels = make(map[string]string)
+				}
+				serverClaim.Labels[metalv1alpha1.ServerMaintenanceNeededLabelKey] = TrueStr
+			})).Should(Succeed())
+
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
+			})).Should(Succeed())
+
+			Eventually(Object(serverClaim)).Should(HaveField("Labels", HaveKeyWithValue(metalv1alpha1.ServerMaintenanceApprovalKey, TrueStr)))
+
+			By("Removing the approval label from the Node")
+			Eventually(Update(node, func() {
+				delete(node.Labels, metalv1alpha1.ServerMaintenanceApprovalKey)
+			})).Should(Succeed())
+
+			By("Verifying the ServerClaim loses the Approval label")
+			Eventually(Object(serverClaim)).ShouldNot(HaveField("Labels", HaveKey(metalv1alpha1.ServerMaintenanceApprovalKey)))
+		})
+
+		It("should NOT add the approval label to the ServerClaim if maintenance was not needed", func(ctx SpecContext) {
+			By("Adding maintenance-approval label to the Node without needed label on Claim")
+			Eventually(Update(node, func() {
+				if node.Labels == nil {
+					node.Labels = make(map[string]string)
+				}
+				node.Labels[metalv1alpha1.ServerMaintenanceApprovalKey] = TrueStr
+			})).Should(Succeed())
+
+			By("Ensuring the ServerClaim does not get the Approval label")
+			Consistently(Object(serverClaim)).ShouldNot(HaveField("Labels", HaveKey(metalv1alpha1.ServerMaintenanceApprovalKey)))
 		})
 	})
 })

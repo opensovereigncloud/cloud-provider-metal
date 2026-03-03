@@ -1,0 +1,6 @@
+apiVersion: metal.ironcore.dev/v1alpha1
+kind: Server
+metadata:
+  name: physical-server-1
+spec:
+  systemUUID: "some-uuid"
